@@ -1,161 +1,172 @@
-from fastapi import FastAPI, Form
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Form, Query
 import pickle
-import requests
+import httpx
 from sklearn.metrics.pairwise import cosine_similarity
+import os
+from dotenv import load_dotenv
+from rapidfuzz import process
+
+load_dotenv()
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
 app = FastAPI()
 
-TMDB_API_KEY = "3f823c8283b2bcaf89d321b4aebc8140"
-
-
-# Load model files
 df = pickle.load(open("df.pkl", "rb"))
 indices = pickle.load(open("indices.pkl", "rb"))
 tfidf_matrix = pickle.load(open("tfidf_matrix.pkl", "rb"))
 
+movie_titles = df["title"].tolist()
 
-# Cache for movie details
+client = httpx.AsyncClient(timeout=5)
 movie_cache = {}
 
-# Fetch movie details from TMDB
+# -------------------------------
+# FUZZY MATCH
+# -------------------------------
+def find_closest_movie(user_input):
+    user_input = user_input.lower().strip()
 
+    # ✅ Step 1: Exact match
+    for title in movie_titles:
+        if user_input == title.lower():
+            return title
 
-def fetch_movie_details(title):
+    # ✅ Step 2: Partial match (contains)
+    partial_matches = [
+        title for title in movie_titles
+        if user_input in title.lower()
+    ]
+
+    if partial_matches:
+        return partial_matches[0]
+
+    # ✅ Step 3: Fuzzy match (VERY STRICT)
+    match, score, _ = process.extractOne(user_input, movie_titles)
+
+    print(f"[FUZZY] {user_input} → {match} ({score})")
+
+    if score < 85:   
+        return None
+
+    return match
+
+# -------------------------------
+# FETCH MOVIE
+# -------------------------------
+async def fetch_movie_details(title):
 
     if title in movie_cache:
         return movie_cache[title]
 
     try:
+        clean_title = title.split("(")[0].strip()
 
-        url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={title}"
-
-        response = requests.get(url, timeout=5)
-
-        if response.status_code != 200:
-            return None
+        response = await client.get(
+            "https://api.themoviedb.org/3/search/movie",
+            params={
+                "api_key": TMDB_API_KEY,
+                "query": clean_title
+            }
+        )
 
         data = response.json()
 
-        if not data["results"]:
+        if not data.get("results"):
             return None
 
         movie = data["results"][0]
 
-        poster = ""
-        if movie.get("poster_path"):
-            poster = "https://image.tmdb.org/t/p/w500" + movie["poster_path"]
-
-        rating = movie.get("vote_average", "N/A")
-
         result = {
             "title": title,
-            "poster": poster,
-            "rating": rating
+            "poster": f"https://image.tmdb.org/t/p/w500{movie['poster_path']}" if movie.get("poster_path") else "",
+            "rating": float(movie.get("vote_average", 0))
         }
 
         movie_cache[title] = result
-
         return result
 
-    except Exception as e:
-
-        print("TMDB error:", e)
+    except:
         return None
 
+# -------------------------------
+# RECOMMEND
+# -------------------------------
+async def recommend(movie, n=10, min_rating=0, sort_by="default"):
 
+    matched_movie = find_closest_movie(movie)
 
-# Recommendation Function
-def recommend(movie, n=10, min_rating=0, sort_by="default"):
+    if not matched_movie:
+        return None, []
 
-    if movie not in indices:
-        return []
+    idx = indices[matched_movie]
 
-    idx = indices[movie]
+    sim_scores = cosine_similarity(
+        tfidf_matrix[idx:idx+1],
+        tfidf_matrix
+    ).flatten()
 
-    sim_scores = cosine_similarity(tfidf_matrix[idx:idx+1], tfidf_matrix).flatten()
-
-    similar_idx = sim_scores.argsort()[::-1][1:50]
+    similar_idx = sim_scores.argsort()[::-1][1:200]
 
     results = []
 
     for i in similar_idx:
-
         title = df.iloc[i]["title"]
 
-        details = fetch_movie_details(title)
+        details = await fetch_movie_details(title)
 
         if not details:
             continue
 
-        rating = details["rating"]
-
-        #  Apply rating filter
-        if rating != "N/A" and float(rating) < min_rating:
+        if details["rating"] < float(min_rating):
             continue
 
         results.append(details)
 
-    # limit number of movies
-    results = results[:n]
+        if len(results) >= n:
+            break
 
-    #  sorting
     if sort_by == "rating":
-        results = sorted(results, key=lambda x: x["rating"], reverse=True)
+        results.sort(key=lambda x: x["rating"], reverse=True)
 
-    return results
+    return matched_movie, results
 
-
-
-# Home Endpoint (Top Movies)
-@app.get("/")
-def home():
-
-    sample = df.head(8)
-
-    movies = []
-
-    for _, row in sample.iterrows():
-
-        title = row["title"]
-
-        details = fetch_movie_details(title)
-
-        if details:
-            movies.append(details)
-
-        else:
-            movies.append({
-                "title": title,
-                "poster": "",
-                "rating": "N/A"
-            })
-
-    return {"movies": movies}
-
-
-
-# Recommendation API
+# -------------------------------
+# RECOMMEND API
+# -------------------------------
 @app.post("/recommend")
-def get_recommendations(movie: str = Form(...)):
+async def get_recommendations(
+    movie: str = Form(...),
+    n: int = Form(10),
+    min_rating: float = Form(0),
+    sort_by: str = Form("default")
+):
+    matched_movie, recommendations = await recommend(movie, n, min_rating, sort_by)
 
-    recommendations = recommend(movie)
-
-    return {
-        "selected_movie": movie,
-        "recommendations": recommendations
+    if not matched_movie:
+        return {
+        "error": "Movie not found in database",
+        "recommendations": []
     }
 
+    return {
+    "matched_movie": matched_movie,
+    "recommendations": recommendations
+}
 
-# Movie Search API
+# -------------------------------
+# LIVE SEARCH API
+# -------------------------------
 @app.get("/search")
-async def search(q: str):
-
+async def search(q: str = Query("")):
     if not q:
-        return JSONResponse([])
+        return []
 
     suggestions = df[
         df["title"].str.contains(q, case=False, na=False)
-    ]["title"].drop_duplicates().head(10)
+    ]["title"].drop_duplicates().head(8)
 
-    return JSONResponse(suggestions.tolist())
+    return suggestions.tolist()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await client.aclose()
