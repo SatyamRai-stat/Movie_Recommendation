@@ -20,7 +20,7 @@ movie_titles = df["title"].tolist()
 client = httpx.AsyncClient(timeout=5)
 movie_cache = {}
 
-# FUZZY MATCH
+
 def find_closest_movie(user_input):
     user_input = user_input.lower().strip()
 
@@ -48,7 +48,7 @@ def find_closest_movie(user_input):
 
     return match
 
-# FETCH MOVIE
+# Fetch Movie
 async def fetch_movie_details(title):
 
     if title in movie_cache:
@@ -84,7 +84,7 @@ async def fetch_movie_details(title):
     except:
         return None
 
-# RECOMMEND
+# Recommend
 async def recommend(movie, n=10, min_rating=0, sort_by="default"):
 
     matched_movie = find_closest_movie(movie)
