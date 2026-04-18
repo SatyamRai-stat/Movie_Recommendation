@@ -20,18 +20,16 @@ movie_titles = df["title"].tolist()
 client = httpx.AsyncClient(timeout=5)
 movie_cache = {}
 
-# -------------------------------
 # FUZZY MATCH
-# -------------------------------
 def find_closest_movie(user_input):
     user_input = user_input.lower().strip()
 
-    # ✅ Step 1: Exact match
+    
     for title in movie_titles:
         if user_input == title.lower():
             return title
 
-    # ✅ Step 2: Partial match (contains)
+   
     partial_matches = [
         title for title in movie_titles
         if user_input in title.lower()
@@ -40,7 +38,7 @@ def find_closest_movie(user_input):
     if partial_matches:
         return partial_matches[0]
 
-    # ✅ Step 3: Fuzzy match (VERY STRICT)
+   
     match, score, _ = process.extractOne(user_input, movie_titles)
 
     print(f"[FUZZY] {user_input} → {match} ({score})")
@@ -50,9 +48,7 @@ def find_closest_movie(user_input):
 
     return match
 
-# -------------------------------
 # FETCH MOVIE
-# -------------------------------
 async def fetch_movie_details(title):
 
     if title in movie_cache:
@@ -88,9 +84,7 @@ async def fetch_movie_details(title):
     except:
         return None
 
-# -------------------------------
 # RECOMMEND
-# -------------------------------
 async def recommend(movie, n=10, min_rating=0, sort_by="default"):
 
     matched_movie = find_closest_movie(movie)
@@ -130,9 +124,7 @@ async def recommend(movie, n=10, min_rating=0, sort_by="default"):
 
     return matched_movie, results
 
-# -------------------------------
 # RECOMMEND API
-# -------------------------------
 @app.post("/recommend")
 async def get_recommendations(
     movie: str = Form(...),
@@ -153,9 +145,7 @@ async def get_recommendations(
     "recommendations": recommendations
 }
 
-# -------------------------------
 # LIVE SEARCH API
-# -------------------------------
 @app.get("/search")
 async def search(q: str = Query("")):
     if not q:
